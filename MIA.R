@@ -1,5 +1,3 @@
-#install.packages("R.matlab")
-## matlab中的hygecdf(n1,n2,n3,n4)==R中的phyper(n1,n3,n2-n3,n4)
 library(R.matlab)
 library(pheatmap)
 mat <- readMat("MIA_example.mat")
