@@ -1,0 +1,315 @@
+---
+title: "mut_mul_&"
+author: "chuhan"
+date: "2020/7/23"
+output:
+  html_document: 
+    df_print: paged
+    toc: yes
+    theme: united
+    toc_float: yes
+    collapsed: yes
+    smooth_scroll: yes
+  pdf_docuument:
+    toc: yes
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Change Work Dir "E://data/work/xinqiao/2020.6/合并突变/mut/"
+
+```{r echo=F, warning=FALSE}
+rm(list = ls())
+mainDir <- "E://data/work/xinqiao/2020.6/合并突变/mut/"
+subDir <- paste0("Mut_result_",Sys.Date())
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+
+```
+
+
+## Get Database
+
+--**使用的队列为cBioPortal中的MSK-IMPACT Clinical Sequencing Cohort (MSKCC, Nat Med 2017)，共1661个样本；**
+
+--**该1661个样本全部接受过免疫治疗，包括非小细胞肺癌，乳腺癌等多个瘤种；**
+
+--**以下分析全部基于该1661例样本（未区分瘤种）**
+
+--**分组方式（两个基因都突变为一组，有任意一个突变或没有突变为另一组）
+
+* 下表表示所有癌种的突变基因以及突变频率
+
+```{r, echo=F, paged.print=TRUE}
+
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))  install.packages("BiocManager")
+#BiocManager::install(c("cBioPortalData","AnVIL"))
+#library(cBioPortalData)
+#library(AnVIL)
+#library(clusterProfiler)
+#library(org.Hs.eg.db)
+#get clinical data 
+#cbio <- cBioPortal()
+#clin <- clinicalData(cbio,"tmb_mskcc_2018")
+#get multiassayexperiment 
+#expr <- cBioDataPack("tmb_mskcc_2018")
+#expr_all <- as(expr@ExperimentList[["mutations_mskcc"]]@assays,"data.frame")
+
+
+clin <- read.table(paste0(mainDir,"/tmb_mskcc_2018/data_clinical_patient.txt"),header = T,sep = '\t')
+clin2 <- read.table(paste0(mainDir,"/tmb_mskcc_2018/data_clinical_sample.txt"),header = T,sep = '\t')
+mut2 <- read.table(paste0(mainDir,"/tmb_mskcc_2018/data_mutations_mskcc.txt"), quote = "" ,sep="\t",header = T)
+mut <- unique(data.frame(barcode=mut2$Tumor_Sample_Barcode,mutgenes=mut2$Hugo_Symbol))
+freq <- as.data.frame(table(mut$mutgenes))
+freq$percent <- freq$Freq/1661
+freq <- freq[order( freq$percent,decreasing = T),]
+colnames(freq) <- c("Mutgenes","number","freq")
+rownames(freq) <- freq[,1]
+freq <- freq[,-1]
+#freq
+write.table(freq,file.path(mainDir, subDir,"ferq.txt"),quote = F,sep = "\t")
+
+```
+
+
+
+```{r, echo=F, paged.print=FALSE}
+## Get martrix
+library(reshape2)
+mut1 <- mut[order(mut$barcode, mut$mutgenes),]
+mut1$value <- 1
+expr <- dcast(mut1,barcode~mutgenes,fun.aggregate = mean)#fun.aggregate = mean表示一个单元格有多个数据，对着多个数据的处理
+rownames(expr) <- expr[,1]
+expr <- expr[,-1]
+expr_fix <- as.data.frame(apply(expr, 2, function(x){ x[is.nan(x)]<- 0; return(x)}))#return函数的重要性
+expr_fix$barcode <- rownames(expr_fix)
+clin$sampleID <- clin2$SAMPLE_ID
+input <- merge(clin,expr_fix,by.x = "sampleID", by.y = "barcode", all.x = T)
+input_fix <- as.data.frame(apply(input,2,function(x){x[is.na(x)] <- 0; return(x)}))
+rownames(input_fix) <- input_fix[,1]
+input_fix$PATIENT_ID <- t(as.data.frame(strsplit(input_fix$OS_STATUS,':'))[1,])#0生1死
+input_fix$OS_STATUS <- input_fix$PATIENT_ID
+input_fixed <- input_fix[,-2]
+#head(input_fixed)
+write.table(input_fixed, file.path(mainDir, subDir,"OS_input.txt"),quote = F,sep = "\t")
+
+```
+
+## OS (logRank_multiple_gene)
+--KRAS/TP53与其他基因合并突变的生存分析
+
+
+### os (Kras_with_anyother_gene)
+--KRAS与其他基因合并突变的生存分析
+
+```{r, echo=FALSE, warning=FALSE, fig.width=9}
+library(survival)
+library(survminer)
+## 批量生存分析 使用  logrank test 方法
+for (i in c(2,4,5,8:length(colnames(input_fixed)))) {
+  input_fixed[,i] <- as.numeric(input_fixed[,i])
+}
+phe <- input_fixed[,1:7]
+colnames(phe) <- c("ID","TMB","gender","time","event","age","drug")
+exprSet <- t(input_fixed[,8:ncol(input_fixed)])
+
+mySurv=with(phe,Surv(time, event))
+exprSet_genes <- rownames(exprSet)
+mut_id <- c()
+mut_gene <- c()
+mut_pval <- c()
+j <- 1
+for ( k in 1:(nrow(exprSet)-1)) {
+   #k=1
+   h <- k+1
+  for (h in h:nrow(exprSet)) {
+   # h=10
+    phe$group=ifelse( exprSet[k,]==1&exprSet[h,]==1, 'Mul_Mut', 'Others')
+    if (length(unique(phe$group))==2) {
+    data.survdiff=survdiff(mySurv~group,data=phe)
+    p.val = 1 - pchisq(data.survdiff$chisq, length(data.survdiff$n) - 1)
+    mut_id[j] <- paste(k,h,sep = "/")
+    mut_gene[j] <- paste(exprSet_genes[k],exprSet_genes[h],sep = "/")
+    mut_pval[j] <- p.val
+    mut_id[j] <- paste(k,h,sep = "/")
+    } 
+    j <- j+1
+    
+  }
+}
+mut_result <- data.frame(mut_id,mut_gene,mut_pval)
+mut_result <- mut_result[order(mut_result$mut_pval),]
+write.table(mut_result, file.path(mainDir, subDir,"mut_result_all.txt"),quote = F,sep = "\t")
+mut_result_pval <- mut_result[(mut_result$mut_pval<0.05),]
+mut_result_pval <- na.omit(mut_result_pval) 
+write.table(mut_result_pval, file.path(mainDir, subDir,"mut_result_filter.txt"),quote = F,sep = "\t")
+kars_mulmut <- mut_result_pval[grep("KRAS",mut_result_pval$mut_gene, fixed = T),]
+write.table(kars_mulmut, file.path(mainDir, subDir,"kars_mulmut_filter.txt"),quote = F,sep = "\t")
+tp53_mulmut <- mut_result_pval[grep("TP53",mut_result_pval$mut_gene, fixed = T),]
+tp53_mulmut_pre <- strsplit(tp53_mulmut$mut_gene,'/') 
+tmp <- c()
+for (i in 1:length(tp53_mulmut_pre)) {
+#i=1
+tmp[i] <- tp53_mulmut_pre[[i]][1]=="TP53"|tp53_mulmut_pre[[i]][2]=="TP53"
+}
+tp53_mulmut_fixed <- tp53_mulmut[tmp,]
+write.table(tp53_mulmut_fixed, file.path(mainDir, subDir,"tp53_mulmut_filter.txt"),quote = F,sep = "\t")
+kars_mulmut
+###########################################
+gs <- kars_mulmut$mut_gene
+
+splots <- list()
+for (i in 1:length(gs)) {
+  #i=1
+  tmp <- unlist(strsplit(gs[i],"/"))
+  phe$group=ifelse( exprSet[tmp[1],]==1&exprSet[tmp[2],]==1, 'Mul_Mut', 'Others')
+  table(phe$group)
+  sfit1 <- survfit(Surv(time, event)~group, data=phe)
+  splots[[i]] <- ggsurvplot(sfit1,pval =TRUE, data = phe, risk.table = F,title = gs[i],risk.table.height = 0.3)
+  #print( splots[[i]] )
+}
+arrange_ggsurvplots(splots, print = TRUE,risk.table = F,risk.table.height = 0.3)
+
+```
+
+
+
+### os (Tp53_with_other_gene)
+--TP53与其他基因合并突变的生存分析
+
+```{r, echo=F, fig.width=9}
+tp53_mulmut_fixed
+gs <- tp53_mulmut_fixed$mut_gene
+
+splots <- list()
+for (i in 1:length(gs)) {
+  #i=1
+  tmp <- unlist(strsplit(gs[i],"/"))
+  phe$group=ifelse( exprSet[tmp[1],]==1&exprSet[tmp[2],]==1, 'Mul_Mut', 'Others')
+  table(phe$group)
+  sfit1 <- survfit(Surv(time, event)~group, data=phe)
+  splots[[i]] <- ggsurvplot(sfit1,pval =TRUE, data = phe, risk.table = F ,title = gs[i],risk.table.height = 0.3)
+  #print( splots[[i]] )
+}
+arrange_ggsurvplots(splots, print = TRUE,risk.table = F,risk.table.height = 0.3)
+```
+
+
+```{r, echo=F, warning=FALSE}
+rm(list = ls())
+mainDir <- "E://data/work/xinqiao/2020.6/合并突变/mut/"
+subDir <- paste0("Mut_result_",Sys.Date())
+
+if (file.exists(subDir)){
+    setwd(file.path(mainDir, subDir))
+} else {
+    dir.create(file.path(mainDir, subDir))
+    setwd(file.path(mainDir, subDir))
+}
+```
+
+
+
+## 验证集双突变
+
+
+```{r, echo=F, paged.print=TRUE, fig.width=9}
+
+
+#if (!requireNamespace("BiocManager", quietly = TRUE))  install.packages("BiocManager")
+#BiocManager::install(c("cBioPortalData","AnVIL"))
+#library(cBioPortalData)
+#library(AnVIL)
+#library(clusterProfiler)
+#library(org.Hs.eg.db)
+#get clinical data 
+#cbio <- cBioPortal()
+#clin <- clinicalData(cbio,"tmb_mskcc_2018")
+#get multiassayexperiment 
+#expr <- cBioDataPack("tmb_mskcc_2018")
+#expr_all <- as(expr@ExperimentList[["mutations_mskcc"]]@assays,"data.frame")
+
+
+test_input <- read.table(paste0(mainDir,"JQZ.txt"),header = T,sep = '\t')
+phe_input <- test_input[ ,1:8]
+phe_input$ID <- 1:nrow(phe_input)
+phe <- phe_input
+colnames(phe) <- c("Age", "Sex","Smoking_history","Histological_type","Stage","PFS","status","Objective_response","ID")
+exprSet_pre <- test_input[ ,9:ncol(test_input)]
+colnames(exprSet_pre) <- c("TRET","TP53","KRAS", "KEAP1","STK11","PTPRD","ERBB4", "TP63")
+exprSet_pre <- t(exprSet_pre)
+
+library(survival)
+library(survminer)
+mySurv=with(phe,Surv(PFS, status))
+exprSet_genes <- rownames(exprSet_pre)
+
+exprSet <- apply(exprSet_pre,2,function(x){ 
+  #x <- exprSet[,1]
+  ifelse(x=="MUT"|x=="promoter", 1, 0)
+  #return(x)
+    })
+
+mut_id <- c()
+mut_gene <- c()
+mut_pval <- c()
+x <- list()
+j <- 1
+for ( k in 1:(nrow(exprSet)-1)) {
+   #k=1
+   h <- k+1
+  for (h in h:nrow(exprSet)) {
+    #h=2
+    phe$group=ifelse( exprSet[k,]==1&exprSet[h,]==1, 'Mul_Mut', 'Others')
+    x[[j]] <- phe
+    
+    if (length(unique(phe$group))==2) {
+    data.survdiff=survdiff(mySurv~group,data=phe)
+    p.val = 1 - pchisq(data.survdiff$chisq, length(data.survdiff$n) - 1)
+    mut_id[j] <- paste(k,h,sep = "/")
+    mut_gene[j] <- paste(exprSet_genes[k],exprSet_genes[h],sep = "/")
+    mut_pval[j] <- p.val
+    mut_id[j] <- paste(k,h,sep = "/")
+    } 
+    j <- j+1
+    
+  }
+}
+
+
+#for (i in 1:28) {
+ 
+  #print(table(x[[i]]$group)) 
+  
+#}
+
+
+mut_result <- data.frame(mut_id,mut_gene,mut_pval)
+mut_result <- na.omit(mut_result[order(mut_result$mut_pval),])
+write.table(mut_result, file.path(mainDir, subDir,"mut_test_all.txt"),quote = F,sep = "\t")
+mut_result_pval <- mut_result[(mut_result$mut_pval<0.05),]
+mut_result_pval <- na.omit(mut_result_pval) 
+write.table(mut_result_pval, file.path(mainDir, subDir,"mut_test_filter.txt"),quote = F,sep = "\t")
+
+gs <- mut_result_pval$mut_gene
+
+splots <- list()
+for (i in 1:length(gs)) {
+  #i=1
+  tmp <- unlist(strsplit(gs[i],"/"))
+  phe$group=ifelse( exprSet[tmp[1],]==1&exprSet[tmp[2],]==1, 'Mul_Mut', 'Others')
+  #print(table(phe$group))
+  sfit1 <- survfit(Surv(PFS, status)~group, data=phe)
+  splots[[i]] <- ggsurvplot(sfit1,pval =TRUE, data = phe, risk.table = F,title = gs[i],risk.table.height = 0.3)
+  #print( splots[[i]] )
+}
+arrange_ggsurvplots(splots, print = TRUE,risk.table = F,risk.table.height = 0.3)
+#summary(sfit1)
+```
