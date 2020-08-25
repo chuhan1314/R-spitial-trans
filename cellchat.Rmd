@@ -1,0 +1,122 @@
+---
+title: "Report-8.21"
+author: "chuhan"
+date: "2020/08/21"
+output:
+  html_document: 
+    df_print: paged
+    toc: yes
+    theme: united
+    toc_float: yes
+    collapsed: yes
+    smooth_scroll: yes
+  pdf_docuument:
+    toc: yes
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+# 新分析点
+```{R message=FALSE, warning=FALSE}
+#devtools::install_local("./CellChat-master.zip")
+library(CellChat)
+library(ggalluvial)
+library(svglite)
+options(stringsAsFactors = FALSE)
+library(Seurat)
+```
+## *细胞互作
+
+```{r fig.width=12, warning=FALSE, paged.print=TRUE}
+rm(list = ls())
+
+if (!file.exists("cell_inte_brain.Rdata")) {
+brain <- Load10X_Spatial("D:\\work\\jia\\zhongliuhelinba\\linba\\outs")
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:50,verbose = F)
+brain <- FindClusters(brain, verbose = FALSE)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:50, verbose = F)
+save(brain, file = "cell_inte_brain.Rdata")
+} else {
+  load("cell_inte_brain.Rdata")
+}
+
+p1 <- DimPlot(brain, reduction = "umap",label=TRUE,label.size=3)
+#p2 <- DimPlot(brain, reduction = "umap",label=TRUE,label.size=3,group.by ="singleR_labels_sec")
+#print(p1+p2)
+p3 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+#p4 <- SpatialDimPlot(brain, label = TRUE, label.size = 3,,group.by ="singleR_labels_sec")
+print(p1+p3)
+
+if (!file.exists("cell_inte_cellchat.Rdata")) {
+data.input <- GetAssayData(brain, assay = "SCT", slot = "data") # normalized data matrix
+labels <- brain@meta.data$seurat_clusters
+identity <- data.frame(group = labels, row.names = rownames( brain@meta.data))
+cellchat <- createCellChat(data = data.input)
+cellchat <- addMeta(cellchat, meta = identity, meta.name = "labels")
+cellchat <- setIdent(cellchat, ident.use = "labels") # set "labels" as default cell identity
+#levels(cellchat@idents)
+groupSize <- as.numeric(table(cellchat@idents))
+
+CellChatDB <- CellChatDB.human # use CellChatDB.human if running on human data
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling for cell-cell communication analysis
+cellchat@DB <- CellChatDB.use # set the used database in the object
+
+cellchat <- subsetData(cellchat) # subset the expression data of signaling genes for saving computation cost
+future::plan("multiprocess", workers = 2) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- projectData(cellchat, PPI.human)
+
+cellchat <- computeCommunProb(cellchat)
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+save(cellchat, groupSize, file = "cell_inte_cellchat.Rdata")
+} else {
+  load("cell_inte_cellchat.Rdata")
+}
+
+#levels(cellchat@idents)
+#head(cellchat@LR$LRsig)
+#cellchat@netP$pathways
+vertex.receiver = seq(1,7) # a numeric vector
+pathways.show <- "TGFb"
+
+netVisual_aggregate(cellchat, signaling = pathways.show,  vertex.receiver = vertex.receiver, vertex.size = groupSize)
+```
+
+```{r}
+netVisual_aggregate(cellchat, signaling = c("TGFb"), layout = "circle", vertex.size = groupSize)
+```
+
+```{r}
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+```
+
+```{r}
+cellchat <- netAnalysis_signalingRole(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+netVisual_signalingRole(cellchat, signaling = pathways.show, width = 12, height = 2.5, font.size = 10)
+```
+
+```{r }
+nPatterns = 5
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns)
+# Visualize the communication pattern using river plot
+netAnalysis_river(cellchat, pattern = "outgoing",font.size = 2.5)
+# Visualize the communication pattern using dot plot
+netAnalysis_dot(cellchat, pattern = "outgoing",font.size =8)
+
+#myidentifyCommunicationPatterns <- edit(identifyCommunicationPatterns)
+#environment(myidentifyCommunicationPatterns) <- environment(identifyCommunicationPatterns)
+#cellchat <- myidentifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns)
+```
+
+```{r }
+nPatterns = 5 
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "incoming", k = nPatterns)
+netAnalysis_river(cellchat, pattern = "incoming",font.size = 2.5)
+netAnalysis_dot(cellchat, pattern = "incoming",font.size =8)
+```
+
